@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clinic Booking</title>
+<style>
+  :root { --bg:#f6f8fb; --card:#fff; --text:#1c2530; --muted:#667085; --line:#e3e8ef;
+          --brand:#0f766e; --brand-d:#0b5a54; --bad:#b42318; --badbg:#fef3f2; --ok:#067647; --okbg:#ecfdf3; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#10151b; --card:#18202a; --text:#e8edf3; --muted:#9aa7b5; --line:#2a3644;
+            --brand:#2dd4bf; --brand-d:#5eead4; --bad:#fda29b; --badbg:#3a1a17; --ok:#75e0a7; --okbg:#10291c; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width:760px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { margin:0 0 4px; font-size:1.6rem; }
+  p.sub { margin:0 0 20px; color:var(--muted); }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  h2 { margin:0 0 12px; font-size:1.1rem; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  select, input { font:inherit; padding:9px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--text); }
+  input { width:100%; }
+  label { display:block; font-size:.9rem; margin:10px 0 4px; color:var(--muted); }
+  button { font:inherit; cursor:pointer; border:0; border-radius:8px; padding:9px 14px; background:var(--brand); color:#fff; font-weight:600; }
+  button:hover:not(:disabled) { background:var(--brand-d); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.ghost { background:transparent; color:var(--brand); border:1px solid var(--brand); }
+  .slot { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:10px 0; border-top:1px solid var(--line); }
+  .slot:first-child { border-top:0; }
+  .slot.sel { background:color-mix(in srgb, var(--brand) 10%, transparent); border-radius:8px; padding-left:8px; padding-right:8px; }
+  .when { font-weight:600; } .who { color:var(--muted); font-size:.9rem; }
+  .tag { font-size:.8rem; padding:2px 8px; border-radius:99px; }
+  .tag.free { background:var(--okbg); color:var(--ok); } .tag.taken { background:var(--badbg); color:var(--bad); }
+  .msg { padding:10px 12px; border-radius:8px; margin-top:12px; } .msg.bad { background:var(--badbg); color:var(--bad); }
+  .msg.ok { background:var(--okbg); color:var(--ok); }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; margin:8px 0 0; } dt { color:var(--muted); } dd { margin:0; word-break:break-all; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Clinic Booking</h1>
+  <p class="sub">Pick an available time, enter your details, and get your confirmation.</p>
+
+  <section>
+    <h2>1. Available times</h2>
+    <div class="row">
+      <label for="provider" style="margin:0">Provider</label>
+      <select id="provider"><option value="">All providers</option></select>
+      <button class="ghost" id="refresh" type="button">Refresh</button>
+    </div>
+    <div id="slots" aria-live="polite">Loading…</div>
+  </section>
+
+  <section id="formBox" class="hidden">
+    <h2>2. Your details</h2>
+    <div id="chosen" class="who"></div>
+    <label for="name">Full name</label><input id="name" autocomplete="name">
+    <label for="email">Email</label><input id="email" type="email" autocomplete="email">
+    <div class="row" style="margin-top:14px"><button id="book" type="button">Book this time</button></div>
+    <div id="error" class="msg bad hidden" role="alert"></div>
+  </section>
+
+  <section id="confirmBox" class="hidden">
+    <h2>3. Confirmation</h2>
+    <div class="msg ok">Your appointment is booked.</div>
+    <dl id="confirm"></dl>
+  </section>
+</main>
+
+<script>
+const API_KEY = __API_KEY__;
+let selected = null, pendingKey = null, pendingBody = null;
+
+const $ = id => document.getElementById(id);
+const fmt = iso => new Date(iso).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+
+async function api(path, options = {}) {
+  const res = await fetch(path, { ...options, headers: { "X-API-Key": API_KEY, "Content-Type": "application/json", ...(options.headers || {}) } });
+  let data = null;
+  try { data = await res.json(); } catch (e) {}
+  return { res, data };
+}
+
+function el(tag, props = {}, ...kids) {
+  const n = document.createElement(tag);
+  Object.assign(n, props);
+  kids.forEach(k => n.append(k));
+  return n;
+}
+
+async function loadSlots() {
+  const provider = $("provider").value;
+  const { res, data } = await api("/slots" + (provider ? "?provider=" + encodeURIComponent(provider) : ""));
+  const box = $("slots");
+  box.replaceChildren();
+  if (!res.ok) { box.textContent = "Could not load times."; return; }
+  const all = data.slots;
+  if ($("provider").options.length === 1) {
+    [...new Set(all.map(s => s.provider))].forEach(p => $("provider").append(el("option", { value: p, textContent: p })));
+  }
+  if (!all.length) { box.textContent = "No times are available right now."; return; }
+  const now = Date.now();
+  all.forEach(s => {
+    const open = s.available && new Date(s.start).getTime() > now;
+    const btn = el("button", { type: "button", textContent: open ? "Choose" : "Unavailable", disabled: !open });
+    btn.onclick = () => choose(s);
+    const row = el("div", { className: "slot" + (selected && selected.id === s.id ? " sel" : "") },
+      el("div", {}, el("div", { className: "when", textContent: fmt(s.start) }), el("div", { className: "who", textContent: s.provider })),
+      el("div", { className: "row" }, el("span", { className: "tag " + (open ? "free" : "taken"), textContent: open ? "Free" : "Booked" }), btn));
+    box.append(row);
+  });
+}
+
+function choose(s) {
+  selected = s; pendingKey = null; pendingBody = null;
+  $("formBox").classList.remove("hidden");
+  $("confirmBox").classList.add("hidden");
+  $("error").classList.add("hidden");
+  $("chosen").textContent = s.provider + " — " + fmt(s.start);
+  loadSlots();
+  $("name").focus();
+}
+
+function showError(text) { const e = $("error"); e.textContent = text; e.classList.remove("hidden"); }
+
+async function book() {
+  $("error").classList.add("hidden");
+  if (!selected) return;
+  const body = { slot_id: selected.id, name: $("name").value, email: $("email").value };
+  const bodyText = JSON.stringify(body);
+  // Same details => same Idempotency-Key, so a double click or retry never books twice.
+  if (bodyText !== pendingBody) { pendingBody = bodyText; pendingKey = crypto.randomUUID(); }
+  $("book").disabled = true;
+  try {
+    const { res, data } = await api("/bookings", { method: "POST", body: bodyText, headers: { "Idempotency-Key": pendingKey } });
+    if (res.status === 201) {
+      const dl = $("confirm"); dl.replaceChildren();
+      [["Booking number", data.id], ["Name", data.name], ["Email", data.email], ["Provider", selected.provider],
+       ["Time", fmt(selected.start)], ["Status", data.status]].forEach(([k, v]) => dl.append(el("dt", { textContent: k }), el("dd", { textContent: v })));
+      $("confirmBox").classList.remove("hidden"); $("formBox").classList.add("hidden");
+      selected = null; loadSlots();
+    } else if (res.status === 409) { showError("Sorry, that time was just taken. Please choose another."); selected = null; loadSlots(); }
+    else if (res.status === 429) { showError("Too many attempts. Please wait " + (res.headers.get("Retry-After") || "a minute") + " seconds and try again."); }
+    else { showError((data && data.error) || "Something went wrong."); }
+  } catch (e) { showError("Network problem. Please try again."); }
+  $("book").disabled = false;
+}
+
+$("refresh").onclick = loadSlots;
+$("provider").onchange = loadSlots;
+$("book").onclick = book;
+loadSlots();
+</script>
+</body>
+</html>
